@@ -63,10 +63,10 @@ def generate_and_clean_data(market_caps):
     has_python = np.random.binomial(1, 0.65, size=n)
 
     base = (
-        4.5 
-        + 1.7 * experience 
-        + 3.2 * has_python 
-        + (cities == "Bangalore") * 2.1 
+        4.5
+        + 1.7 * experience
+        + 3.2 * has_python
+        + (cities == "Bangalore") * 2.1
         + (cities == "Hyderabad") * 1.2
         + (companies == "Microsoft") * 14.5
         + (companies == "Google") * 16.0
@@ -113,6 +113,15 @@ selected_roles = st.sidebar.multiselect("Select Roles", options=list(df["Role"].
 
 view_df = df[(df["City"].isin(selected_cities)) & (df["Role"].isin(selected_roles))]
 
+# --- Added: export filtered dataset ---
+st.sidebar.markdown("---")
+st.sidebar.download_button(
+    label="⬇️ Download Filtered Data (CSV)",
+    data=view_df.to_csv(index=False).encode("utf-8"),
+    file_name="filtered_salary_data.csv",
+    mime="text/csv"
+)
+
 # ---------------------------------------------------------
 # Real-Time Market Cap Ticker
 # ---------------------------------------------------------
@@ -139,7 +148,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 with tab1:
     st.subheader("1. Salary Distribution & Percentiles")
     c1, c2 = st.columns([1, 2])
-    
+
     with c1:
         bins = [0, 6, 12, 18, 30, np.inf]
         labels = ["< 6 LPA", "6 - 12 LPA", "12 - 18 LPA", "18 - 30 LPA", "30+ LPA"]
@@ -162,7 +171,7 @@ with tab1:
 # --- TAB 2: CONFIDENCE INTERVALS ---
 with tab2:
     st.subheader("2. 95% Confidence Intervals for HR Salary Bands")
-    st.write("Provides a statistically sound recruitment range ($\bar{X} \pm t \times \text{SEM}$) rather than a fragile single-number mean.")
+    st.write("Provides a statistically sound recruitment range ($\\bar{X} \\pm t \\times \\text{SEM}$) rather than a fragile single-number mean.")
 
     def calc_ci(sub_data, confidence=0.95):
         m = np.mean(sub_data)
@@ -193,9 +202,9 @@ with tab2:
 # --- TAB 3: HYPOTHESIS TESTING ---
 with tab3:
     st.subheader("3. Inferential Testing: What Drives Pay?")
-    
+
     col_t, col_f = st.columns(2)
-    
+
     with col_t:
         st.markdown("#### A. Two-Sample Welch's t-Test (Python Premium)")
         py1 = view_df[view_df["Python_Skill"] == 1]["Salary_LPA"]
@@ -215,7 +224,7 @@ with tab3:
     with col_f:
         st.markdown("#### B. One-Way ANOVA (City-Level Disparity)")
         groups = [view_df[view_df["City"] == city]["Salary_LPA"] for city in view_df["City"].unique() if len(view_df[view_df["City"] == city]) > 1]
-        
+
         if len(groups) > 1:
             f_val, f_pval = stats.f_oneway(*groups)
             st.write(f"- **F-statistic:** `{f_val:.4f}`")
@@ -228,16 +237,16 @@ with tab3:
 # --- TAB 4: REGRESSION & VIF ---
 with tab4:
     st.subheader("4. Multiple Linear Regression & Multicollinearity")
-    
+
     reg_df = df[["Salary_LPA", "Experience_Yrs", "Python_Skill", "City", "Company"]].copy()
     reg_df = pd.get_dummies(reg_df, columns=["City", "Company"], drop_first=True, dtype=float)
-    
+
     X = reg_df.drop(columns=["Salary_LPA"])
     y = reg_df["Salary_LPA"]
     X_const = sm.add_constant(X)
 
     c_vif, c_ols = st.columns([1, 2])
-    
+
     with c_vif:
         st.markdown("**VIF Multicollinearity Check**")
         vif_data = pd.DataFrame({
@@ -261,7 +270,7 @@ with tab4:
 # --- TAB 5: K-MEANS BANDING ---
 with tab5:
     st.subheader("5. Automated Market Segmentation via K-Means")
-    
+
     k = st.slider("Select Cluster Count (Bands):", min_value=2, max_value=6, value=4)
     cluster_features = df[["Experience_Yrs", "Salary_LPA"]]
     scaler = StandardScaler()
@@ -289,12 +298,12 @@ with tab5:
 
     fig2, ax2 = plt.subplots(figsize=(9, 4.5))
     sns.scatterplot(
-        data=df, 
-        x="Experience_Yrs", 
-        y="Salary_LPA", 
-        hue="Salary_Band", 
-        palette="viridis", 
-        alpha=0.8, 
+        data=df,
+        x="Experience_Yrs",
+        y="Salary_LPA",
+        hue="Salary_Band",
+        palette="viridis",
+        alpha=0.8,
         ax=ax2
     )
     ax2.set_title("Market Clusters: Experience vs Salary Banding")
