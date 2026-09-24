@@ -1,312 +1,384 @@
-import warnings
-import streamlit as st
+"""
+=================================================================================
+PROD-ML: SALARY MARKET INTELLIGENCE & REAL-TIME PREDICTIVE ENGINE
+Architecture:
+  - Phase 1: Distribution Fitting (MLE Log-Normal), Cook's Distance Outlier Filtering,
+             and 95% Confidence Interval Estimations.
+  - Phase 2: Hypothesis Testing Engine (Independent Welch's t-test & One-Way ANOVA).
+  - Phase 3: Dual-Model Predictive Engine:
+             * OLS Regression with Variance Inflation Factor (VIF) multicollinearity checks.
+             * Logistic Regression for Target Median Probability Classification.
+  - Phase 4: Market Segmentation (K-Means Clustering) & Skill-Gap Career Action Plan.
+=================================================================================
+"""
+
 import numpy as np
 import pandas as pd
-import scipy.stats as stats
+from scipy import stats
 import statsmodels.api as sm
 from statsmodels.stats.outliers_influence import variance_inflation_factor
+from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-import yfinance as yf
-import matplotlib.pyplot as plt
-import seaborn as sns
+import warnings
 
 warnings.filterwarnings("ignore")
+np.random.seed(42)
 
-# ---------------------------------------------------------
-# Page Configuration
-# ---------------------------------------------------------
-st.set_page_config(
-    page_title="Salary Market & Corporate Cap Intelligence",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# ===============================================================================
+# CONFIGURATION & SYNTHETIC DATA GENERATION
+# ===============================================================================
 
-st.title("💼 Tech Salary Market Analysis & Corporate Cap Platform")
-st.caption("End-to-End Econometric & Statistical Pipeline: Real-Time Valuation -> CIs -> Hypothesis Testing -> Regression -> K-Means Banding")
+SKILL_CATALOG = [
+    "Python", "SQL", "Docker", "Kubernetes", "AWS", 
+    "Machine Learning", "System Design", "Distributed Systems", "GenAI"
+]
 
-# ---------------------------------------------------------
-# Data Layer with Streamlit Caching
-# ---------------------------------------------------------
-@st.cache_data(ttl=3600)
-def fetch_market_caps():
-    tickers = {
-        "TCS": "TCS.NS",
-        "Infosys": "INFY.NS",
-        "Wipro": "WIPRO.NS",
-        "Microsoft": "MSFT",
-        "Google": "GOOGL"
-    }
-    caps = {}
-    for comp, sym in tickers.items():
-        try:
-            tkr = yf.Ticker(sym)
-            val = tkr.fast_info.get("marketCap", None)
-            if val is None:
-                val = tkr.info.get("marketCap", 1e11)
-            caps[comp] = round(val / 1e9, 2)  # In Billions
-        except Exception:
-            # Fallbacks in Billions if network throttles
-            fallbacks = {"TCS": 14200.0, "Infosys": 7800.0, "Wipro": 2900.0, "Microsoft": 3150.0, "Google": 2100.0}
-            caps[comp] = fallbacks[comp]
-    return caps
+HIGH_VALUE_SKILLS = {"GenAI", "Distributed Systems", "System Design"}
 
-@st.cache_data
-def generate_and_clean_data(market_caps):
-    np.random.seed(42)
-    n = 1200
+REGIONS = ["Bengaluru", "Hyderabad", "Pune", "Delhi-NCR"]
+COMPANY_TIERS = ["Startup", "Global MNC", "Tier-1 Product"]
 
-    companies = np.random.choice(["TCS", "Infosys", "Wipro", "Microsoft", "Google"], size=n, p=[0.30, 0.25, 0.20, 0.15, 0.10])
-    roles = np.random.choice(["Data Analyst", "Data Scientist", "Software Engineer"], size=n, p=[0.35, 0.35, 0.30])
-    cities = np.random.choice(["Hyderabad", "Bangalore", "Pune"], size=n, p=[0.40, 0.40, 0.20])
-    experience = np.clip(np.random.gamma(shape=3.0, scale=1.8, size=n), 0.5, 20.0).round(1)
-    has_python = np.random.binomial(1, 0.65, size=n)
-
-    base = (
-        4.5
-        + 1.7 * experience
-        + 3.2 * has_python
-        + (cities == "Bangalore") * 2.1
-        + (cities == "Hyderabad") * 1.2
-        + (companies == "Microsoft") * 14.5
-        + (companies == "Google") * 16.0
-        + (companies == "TCS") * (-1.0)
-        + np.random.normal(0, 2.5, size=n)
+def generate_mock_salary_data(n_samples: int = 2500) -> pd.DataFrame:
+    """
+    Generates a log-normally distributed compensation dataset with collinear 
+    demographic features (Age & Experience) and skill vectors.
+    """
+    experience = np.clip(np.random.gamma(shape=3.0, scale=2.0, size=n_samples), 0.5, 25.0)
+    # Inject collinearity: Age is directly correlated with Experience + noise
+    age = 22 + experience + np.random.normal(0, 1.2, size=n_samples)
+    
+    tier = np.random.choice(COMPANY_TIERS, size=n_samples, p=[0.35, 0.40, 0.25])
+    region = np.random.choice(REGIONS, size=n_samples, p=[0.40, 0.25, 0.20, 0.15])
+    
+    # Generate binary skill matrix
+    skill_data = {}
+    for skill in SKILL_CATALOG:
+        prob = 0.55 if skill in ["Python", "SQL"] else (0.25 if skill in HIGH_VALUE_SKILLS else 0.40)
+        skill_data[f"skill_{skill}"] = np.random.binomial(1, prob, size=n_samples)
+    
+    skills_df = pd.DataFrame(skill_data)
+    premium_skill_count = sum(skills_df[f"skill_{s}"] for s in HIGH_VALUE_SKILLS)
+    all_skill_count = skills_df.sum(axis=1)
+    
+    # Base compensation model on log scale
+    tier_multipliers = {"Startup": 0.05, "Global MNC": 0.22, "Tier-1 Product": 0.58}
+    region_multipliers = {"Bengaluru": 0.15, "Hyderabad": 0.08, "Pune": 0.02, "Delhi-NCR": 0.05}
+    
+    mu_log_salary = (
+        2.2 
+        + 0.085 * experience 
+        + 0.04 * all_skill_count 
+        + 0.12 * premium_skill_count 
+        + pd.Series(tier).map(tier_multipliers).values
+        + pd.Series(region).map(region_multipliers).values
     )
-    salaries = np.clip(base, 3.2, 85.0).round(2)
-
-    # Outliers injection
-    outlier_idx = np.random.choice(n, size=15, replace=False)
-    salaries[outlier_idx] = np.random.uniform(90.0, 160.0, size=15)
-
-    df_raw = pd.DataFrame({
-        "Company": companies,
-        "Role": roles,
-        "City": cities,
-        "Experience_Yrs": experience,
-        "Python_Skill": has_python,
-        "Salary_LPA": salaries
+    
+    # Log-normal distribution with random market variance
+    sigma_log_salary = 0.28
+    salary_lpa = np.random.lognormal(mean=mu_log_salary, sigma=sigma_log_salary)
+    
+    df = pd.DataFrame({
+        "experience": experience,
+        "age": age,
+        "company_tier": tier,
+        "region": region,
+        "salary_lpa": np.round(salary_lpa, 2)
     })
-    df_raw["Market_Cap_B"] = df_raw["Company"].map(market_caps)
+    
+    return pd.concat([df, skills_df], axis=1)
 
-    # IQR Outlier Removal
-    q1 = df_raw["Salary_LPA"].quantile(0.25)
-    q3 = df_raw["Salary_LPA"].quantile(0.75)
-    iqr = q3 - q1
-    upper = q3 + 1.5 * iqr
-    lower = max(0, q1 - 1.5 * iqr)
 
-    df_filtered = df_raw[(df_raw["Salary_LPA"] >= lower) & (df_raw["Salary_LPA"] <= upper)].copy()
-    return df_raw, df_filtered
+# ===============================================================================
+# PHASE 1: DATA PREPARATION, DISTRIBUTION & ANOMALY FILTERING
+# ===============================================================================
 
-# Load data
-with st.spinner("Fetching real-time market data & preparing models..."):
-    market_caps = fetch_market_caps()
-    raw_df, df = generate_and_clean_data(market_caps)
+def run_phase_1(df: pd.DataFrame) -> pd.DataFrame:
+    print("=" * 80)
+    print("PHASE 1: DISTRIBUTION MODELING, CONFIDENCE INTERVALS & OUTLIER DETECTION")
+    print("=" * 80)
+    
+    # 1. MLE Fit for Log-Normal Distribution
+    shape, loc, scale = stats.lognorm.fit(df["salary_lpa"], floc=0)
+    mu_mle = np.log(scale)
+    sigma_mle = shape
+    print(f"[*] MLE Log-Normal Fit Parameters: mu = {mu_mle:.4f}, sigma = {sigma_mle:.4f}")
+    
+    # Kolmogorov-Smirnov Test for Goodness of Fit
+    ks_stat, ks_p_val = stats.kstest(df["salary_lpa"], "lognorm", args=(shape, loc, scale))
+    print(f"[*] KS Test: Statistic = {ks_stat:.4f}, p-value = {ks_p_val:.4e} "
+          f"({'Log-Normal supported' if ks_p_val > 0.05 else 'Empirical skew present'})")
+    
+    # 2. 95% Confidence Interval for Salary Across Corporate Tiers
+    print("\n[*] 95% Parametric Confidence Intervals (LPA) by Company Tier:")
+    for tier in COMPANY_TIERS:
+        tier_data = df[df["company_tier"] == tier]["salary_lpa"]
+        n = len(tier_data)
+        mean = tier_data.mean()
+        sem = stats.sem(tier_data)
+        ci_low, ci_high = stats.t.interval(0.95, df=n-1, loc=mean, scale=sem)
+        print(f"    - {tier:<16}: Mean = {mean:6.2f} LPA | 95% CI = [{ci_low:6.2f}, {ci_high:6.2f}]")
+    
+    # 3. Cook's Distance Outlier Filtering via OLS Baseline
+    base_formula = "salary_lpa ~ experience + " + " + ".join([c for c in df.columns if c.startswith("skill_")])
+    model = sm.OLS.from_formula(base_formula, data=df).fit()
+    influence = model.get_influence()
+    cooks_d = influence.cooks_distance[0]
+    
+    # Standard threshold 4 / n
+    threshold = 4.0 / len(df)
+    outliers = np.where(cooks_d > threshold)[0]
+    df_clean = df.drop(index=outliers).reset_index(drop=True)
+    
+    print(f"\n[*] Cook's Distance Anomaly Screening:")
+    print(f"    - Threshold (4/n)   : {threshold:.6f}")
+    print(f"    - Outliers Removed  : {len(outliers)} rows ({len(outliers) / len(df) * 100:.2f}%)")
+    print(f"    - Retained Records  : {len(df_clean)}")
+    
+    return df_clean
 
-# ---------------------------------------------------------
-# Sidebar Controls
-# ---------------------------------------------------------
-st.sidebar.header("🕹️ Filter & Parameters")
-selected_cities = st.sidebar.multiselect("Select Cities", options=list(df["City"].unique()), default=list(df["City"].unique()))
-selected_roles = st.sidebar.multiselect("Select Roles", options=list(df["Role"].unique()), default=list(df["Role"].unique()))
 
-view_df = df[(df["City"].isin(selected_cities)) & (df["Role"].isin(selected_roles))]
+# ===============================================================================
+# PHASE 2: HYPOTHESIS TESTING ENGINE
+# ===============================================================================
 
-# --- Added: export filtered dataset ---
-st.sidebar.markdown("---")
-st.sidebar.download_button(
-    label="⬇️ Download Filtered Data (CSV)",
-    data=view_df.to_csv(index=False).encode("utf-8"),
-    file_name="filtered_salary_data.csv",
-    mime="text/csv"
-)
+def run_phase_2(df: pd.DataFrame):
+    print("\n" + "=" * 80)
+    print("PHASE 2: STATISTICAL HYPOTHESIS TESTING (T-TEST & ANOVA)")
+    print("=" * 80)
+    
+    # 1. Welch's t-test: Pay Gap for High-Value Skills (e.g., GenAI)
+    has_genai = df[df["skill_GenAI"] == 1]["salary_lpa"]
+    no_genai = df[df["skill_GenAI"] == 0]["salary_lpa"]
+    
+    t_stat, t_pval = stats.ttest_ind(has_genai, no_genai, equal_var=False)
+    print(f"[*] Two-Sample Welch's t-test: Impact of 'GenAI' on Compensation:")
+    print(f"    - Mean (With GenAI)    : {has_genai.mean():.2f} LPA (n={len(has_genai)})")
+    print(f"    - Mean (Without GenAI) : {no_genai.mean():.2f} LPA (n={len(no_genai)})")
+    print(f"    - Observed Delta       : +{has_genai.mean() - no_genai.mean():.2f} LPA")
+    print(f"    - t-statistic = {t_stat:.4f}, p-value = {t_pval:.4e}")
+    if t_pval < 0.05:
+        print("    - Verdict: Statistically significant premium (p < 0.05). Reject Null Hypothesis H0.")
+    else:
+        print("    - Verdict: No statistically significant premium detected.")
 
-# ---------------------------------------------------------
-# Real-Time Market Cap Ticker
-# ---------------------------------------------------------
-st.markdown("### 🏢 Live Corporate Market Capitalization")
-col_caps = st.columns(len(market_caps))
-for idx, (comp, cap) in enumerate(market_caps.items()):
-    curr = "₹" if comp in ["TCS", "Infosys", "Wipro"] else "$"
-    col_caps[idx].metric(label=comp, value=f"{curr}{cap:,.1f} B")
+    # 2. One-Way ANOVA: Variance Across Company Tiers
+    groups = [df[df["company_tier"] == tier]["salary_lpa"].values for tier in COMPANY_TIERS]
+    f_stat, f_pval = stats.f_oneway(*groups)
+    print(f"\n[*] One-Way ANOVA: Salary Variance Across Company Tiers:")
+    print(f"    - Tiers Compared: {COMPANY_TIERS}")
+    print(f"    - F-statistic = {f_stat:.4f}, p-value = {f_pval:.4e}")
+    if f_pval < 0.05:
+        print("    - Verdict: Inter-tier compensation variances are statistically significant.")
+    else:
+        print("    - Verdict: Inconclusive variance difference across tiers.")
 
-st.markdown("---")
 
-# ---------------------------------------------------------
-# Tabbed Statistical Dashboard
-# ---------------------------------------------------------
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "1. Descriptive & CDF",
-    "2. Confidence Intervals",
-    "3. Hypothesis Testing",
-    "4. Regression & VIF",
-    "5. K-Means Banding"
-])
+# ===============================================================================
+# PHASE 3: REAL-TIME PREDICTIVE ENGINE (OLS & LOGISTIC CLASSIFICATION)
+# ===============================================================================
 
-# --- TAB 1: DESCRIPTIVE & CDF ---
-with tab1:
-    st.subheader("1. Salary Distribution & Percentiles")
-    c1, c2 = st.columns([1, 2])
+def run_phase_3(df: pd.DataFrame, user_profile: dict):
+    print("\n" + "=" * 80)
+    print("PHASE 3: DUAL-MODEL PREDICTIVE ENGINE (REGRESSION & LOGISTIC)")
+    print("=" * 80)
+    
+    # 1. Multicollinearity Assessment via VIF
+    vif_features = df[["experience", "age"]].copy()
+    vif_features = sm.add_constant(vif_features)
+    vif_results = pd.DataFrame({
+        "Feature": vif_features.columns,
+        "VIF": [variance_inflation_factor(vif_features.values, i) for i in range(vif_features.shape[1])]
+    })
+    
+    print("[*] Variance Inflation Factor (VIF) Diagnostics:")
+    for _, row in vif_results.iterrows():
+        print(f"    - {row['Feature']:<12}: {row['VIF']:.2f}")
+    
+    # Drop 'age' due to severe collinearity with 'experience' (VIF >> 5.0)
+    print("    [!] Decision: 'age' exhibits severe collinearity with 'experience'. Dropping 'age' from regressor.")
 
-    with c1:
-        bins = [0, 6, 12, 18, 30, np.inf]
-        labels = ["< 6 LPA", "6 - 12 LPA", "12 - 18 LPA", "18 - 30 LPA", "30+ LPA"]
-        view_df["Bracket"] = pd.cut(view_df["Salary_LPA"], bins=bins, labels=labels)
-        freq = view_df["Bracket"].value_counts().sort_index().to_frame("Count")
-        st.write("**Frequency Distribution (LPA)**")
-        st.dataframe(freq, use_container_width=True)
+    # 2. OLS Multiple Linear Regression (Trained on Log Scale for Skewed Target)
+    df_encoded = pd.get_dummies(df.drop(columns=["age"]), columns=["company_tier", "region"], drop_first=True)
+    feature_cols = [c for c in df_encoded.columns if c != "salary_lpa"]
+    
+    X = sm.add_constant(df_encoded[feature_cols].astype(float))
+    y_log = np.log(df_encoded["salary_lpa"])
+    ols_model = sm.OLS(y_log, X).fit()
+    
+    # Construct User Feature Vector
+    user_row = {col: 0.0 for col in feature_cols}
+    user_row["experience"] = user_profile["experience"]
+    for s in user_profile["skills"]:
+        if f"skill_{s}" in user_row:
+            user_row[f"skill_{s}"] = 1.0
+            
+    tier_col = f"company_tier_{user_profile['target_tier']}"
+    if tier_col in user_row:
+        user_row[tier_col] = 1.0
+        
+    region_col = f"region_{user_profile['target_region']}"
+    if region_col in user_row:
+        user_row[region_col] = 1.0
+        
+    user_vector = pd.DataFrame([user_row])
+    user_vector_const = sm.add_constant(user_vector, has_constant="add")
+    # Ensure exact feature alignment
+    user_vector_const = user_vector_const.reindex(columns=X.columns, fill_value=0.0)
+    
+    predicted_log_salary = ols_model.predict(user_vector_const)[0]
+    # Smearing correction factor for log-transformed OLS
+    residuals = y_log - ols_model.fittedvalues
+    smearing_factor = np.mean(np.exp(residuals))
+    predicted_lpa = np.exp(predicted_log_salary) * smearing_factor
+    
+    print(f"\n[*] OLS Prediction Result:")
+    print(f"    - Model R-squared       : {ols_model.rsquared:.4f}")
+    print(f"    - Predicted Market Rate : {predicted_lpa:.2f} LPA")
 
-        target_cutoff = st.number_input("Empirical CDF Threshold (LPA):", min_value=3.0, max_value=80.0, value=12.0, step=1.0)
-        pct_below = (view_df["Salary_LPA"] < target_cutoff).mean() * 100
-        st.info(f"💡 **{pct_below:.1f}%** of engineers/analysts earn less than **{target_cutoff} LPA**.")
+    # 3. Logistic Regression: Probability of Exceeding Target Tier's Median Salary
+    tier_median = df[df["company_tier"] == user_profile["target_tier"]]["salary_lpa"].median()
+    df_encoded["above_target_median"] = (df_encoded["salary_lpa"] >= tier_median).astype(int)
+    
+    X_clf = df_encoded[feature_cols].astype(float)
+    y_clf = df_encoded["above_target_median"]
+    
+    clf = LogisticRegression(max_iter=1000, C=1.0)
+    clf.fit(X_clf, y_clf)
+    
+    prob_above_median = clf.predict_proba(user_vector[feature_cols])[0][1]
+    
+    print(f"\n[*] Logistic Classification Engine:")
+    print(f"    - Benchmark Target Tier : {user_profile['target_tier']} (Median = {tier_median:.2f} LPA)")
+    print(f"    - Probability > Median  : {prob_above_median * 100:.2f}%")
+    print(f"    - Classification Status : {'COMPETITIVE (Above Median)' if prob_above_median >= 0.50 else 'UNDER-INDEXED (Below Median)'}")
+    
+    return predicted_lpa, tier_median
 
-    with c2:
-        fig, ax = plt.subplots(figsize=(8, 4))
-        sns.histplot(view_df["Salary_LPA"], kde=True, bins=25, color="#1f77b4", ax=ax)
-        ax.set_title("Salary Distribution with KDE Fit")
-        ax.set_xlabel("Compensation (LPA)")
-        st.pyplot(fig)
 
-# --- TAB 2: CONFIDENCE INTERVALS ---
-with tab2:
-    st.subheader("2. 95% Confidence Intervals for HR Salary Bands")
-    st.write("Provides a statistically sound recruitment range ($\\bar{X} \\pm t \\times \\text{SEM}$) rather than a fragile single-number mean.")
+# ===============================================================================
+# PHASE 4: SEGMENTATION & SKILL GAP ACTION PLAN
+# ===============================================================================
 
-    def calc_ci(sub_data, confidence=0.95):
-        m = np.mean(sub_data)
-        sem = stats.sem(sub_data)
-        n = len(sub_data)
-        inv = sem * stats.t.ppf((1 + confidence) / 2., n - 1)
-        return round(m, 2), round(m - inv, 2), round(m + inv, 2)
-
-    ci_list = []
-    for r in view_df["Role"].unique():
-        for c in view_df["City"].unique():
-            sample = view_df[(view_df["Role"] == r) & (view_df["City"] == c)]["Salary_LPA"]
-            if len(sample) >= 5:
-                mean_val, low, high = calc_ci(sample)
-                ci_list.append({
-                    "Role": r,
-                    "City": c,
-                    "N": len(sample),
-                    "Mean (LPA)": mean_val,
-                    "95% CI Lower": low,
-                    "95% CI Upper": high,
-                    "Recommended Band": f"{low} - {high} LPA"
-                })
-
-    ci_table = pd.DataFrame(ci_list)
-    st.dataframe(ci_table, use_container_width=True)
-
-# --- TAB 3: HYPOTHESIS TESTING ---
-with tab3:
-    st.subheader("3. Inferential Testing: What Drives Pay?")
-
-    col_t, col_f = st.columns(2)
-
-    with col_t:
-        st.markdown("#### A. Two-Sample Welch's t-Test (Python Premium)")
-        py1 = view_df[view_df["Python_Skill"] == 1]["Salary_LPA"]
-        py0 = view_df[view_df["Python_Skill"] == 0]["Salary_LPA"]
-
-        if len(py1) > 1 and len(py0) > 1:
-            t_val, p_val = stats.ttest_ind(py1, py0, equal_var=False)
-            st.write(f"- **Python Mean:** {py1.mean():.2f} LPA")
-            st.write(f"- **No-Python Mean:** {py0.mean():.2f} LPA")
-            st.write(f"- **t-statistic:** `{t_val:.4f}`")
-            st.write(f"- **p-value:** `{p_val:.4e}`")
-            if p_val < 0.05:
-                st.success("Verdict: Statistically significant pay premium for Python skill (p < 0.05).")
-            else:
-                st.warning("Verdict: No statistically significant pay premium detected.")
-
-    with col_f:
-        st.markdown("#### B. One-Way ANOVA (City-Level Disparity)")
-        groups = [view_df[view_df["City"] == city]["Salary_LPA"] for city in view_df["City"].unique() if len(view_df[view_df["City"] == city]) > 1]
-
-        if len(groups) > 1:
-            f_val, f_pval = stats.f_oneway(*groups)
-            st.write(f"- **F-statistic:** `{f_val:.4f}`")
-            st.write(f"- **p-value:** `{f_pval:.4e}`")
-            if f_pval < 0.05:
-                st.success("Verdict: Significant salary divergence across geographic locations (p < 0.05).")
-            else:
-                st.warning("Verdict: Pay difference across cities is not statistically significant.")
-
-# --- TAB 4: REGRESSION & VIF ---
-with tab4:
-    st.subheader("4. Multiple Linear Regression & Multicollinearity")
-
-    reg_df = df[["Salary_LPA", "Experience_Yrs", "Python_Skill", "City", "Company"]].copy()
-    reg_df = pd.get_dummies(reg_df, columns=["City", "Company"], drop_first=True, dtype=float)
-
-    X = reg_df.drop(columns=["Salary_LPA"])
-    y = reg_df["Salary_LPA"]
-    X_const = sm.add_constant(X)
-
-    c_vif, c_ols = st.columns([1, 2])
-
-    with c_vif:
-        st.markdown("**VIF Multicollinearity Check**")
-        vif_data = pd.DataFrame({
-            "Feature": X_const.columns,
-            "VIF": [variance_inflation_factor(X_const.values, i) for i in range(X_const.shape[1])]
-        }).round(2)
-        st.dataframe(vif_data, use_container_width=True)
-        st.caption("All variable VIFs < 5.0 indicates absence of damaging multicollinearity.")
-
-    with c_ols:
-        st.markdown("**OLS Model Estimates**")
-        model = sm.OLS(y, X_const).fit()
-        coef_df = pd.DataFrame({
-            "Coef": model.params,
-            "Std Error": model.bse,
-            "p-value": model.pvalues
-        }).round(4)
-        st.dataframe(coef_df, use_container_width=True)
-        st.metric("Model R²", f"{model.rsquared:.4f}", f"Adj. R²: {model.rsquared_adj:.4f}")
-
-# --- TAB 5: K-MEANS BANDING ---
-with tab5:
-    st.subheader("5. Automated Market Segmentation via K-Means")
-
-    k = st.slider("Select Cluster Count (Bands):", min_value=2, max_value=6, value=4)
-    cluster_features = df[["Experience_Yrs", "Salary_LPA"]]
+def run_phase_4(df: pd.DataFrame, user_profile: dict, user_predicted_lpa: float):
+    print("\n" + "=" * 80)
+    print("PHASE 4: K-MEANS SEGMENTATION & CAREER LADDER ACTION PLAN")
+    print("=" * 80)
+    
+    skill_cols = [c for c in df.columns if c.startswith("skill_")]
+    clustering_features = ["experience", "salary_lpa"] + skill_cols
+    
     scaler = StandardScaler()
-    scaled = scaler.fit_transform(cluster_features)
+    scaled_matrix = scaler.fit_transform(df[clustering_features])
+    
+    kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
+    df["cluster"] = kmeans.fit_predict(scaled_matrix)
+    
+    # Compute cluster summary metrics
+    cluster_profiles = []
+    for c in range(4):
+        c_df = df[df["cluster"] == c]
+        cluster_profiles.append({
+            "cluster_id": c,
+            "mean_salary": c_df["salary_lpa"].mean(),
+            "min_salary": c_df["salary_lpa"].min(),
+            "max_salary": c_df["salary_lpa"].max(),
+            "mean_exp": c_df["experience"].mean(),
+            "skill_prevalence": c_df[skill_cols].mean()
+        })
+        
+    # Sort clusters in ascending order of compensation
+    cluster_profiles.sort(key=lambda x: x["mean_salary"])
+    
+    print("[*] Segmented Market Salary Bands (K-Means 4-Cluster Topology):")
+    for rank, cp in enumerate(cluster_profiles):
+        print(f"    Band {rank + 1} (Cluster #{cp['cluster_id']}): "
+              f"Range: [{cp['min_salary']:5.2f} - {cp['max_salary']:5.2f}] LPA | "
+              f"Avg: {cp['mean_salary']:5.2f} LPA | Exp: {cp['mean_exp']:.1f} yrs")
+        
+    # Project user profile into clustering space
+    user_row = {"experience": user_profile["experience"], "salary_lpa": user_predicted_lpa}
+    for col in skill_cols:
+        skill_name = col.replace("skill_", "")
+        user_row[col] = 1.0 if skill_name in user_profile["skills"] else 0.0
+        
+    user_vec_scaled = scaler.transform(pd.DataFrame([user_row])[clustering_features])
+    user_cluster_id = kmeans.predict(user_vec_scaled)[0]
+    
+    # Locate current band rank
+    current_band_rank = [i for i, cp in enumerate(cluster_profiles) if cp["cluster_id"] == user_cluster_id][0]
+    print(f"\n[*] User Mapping:")
+    print(f"    - Current Segment: Band {current_band_rank + 1} (Cluster #{user_cluster_id})")
+    
+    # Determine next cluster gap analysis
+    if current_band_rank < len(cluster_profiles) - 1:
+        target_band = cluster_profiles[current_band_rank + 1]
+        print(f"    - Target Advancement: Band {current_band_rank + 2} (Avg: {target_band['mean_salary']:.2f} LPA)")
+        
+        target_skill_prev = target_band["skill_prevalence"]
+        user_skills_set = set(user_profile["skills"])
+        
+        # Identify missing skills that have high prevalence in the target band
+        gap_skills = []
+        for col, rate in target_skill_prev.items():
+            s_name = col.replace("skill_", "")
+            if s_name not in user_skills_set and rate >= 0.40:
+                gap_skills.append((s_name, rate))
+                
+        gap_skills.sort(key=lambda x: x[1], reverse=True)
+        
+        print("\n[*] Recommended Skill Acquisition Roadmap:")
+        if gap_skills:
+            for s_name, rate in gap_skills:
+                print(f"    [+] Priority Skill: {s_name:<20} (Found in {rate * 100:.1f}% of profiles in next band)")
+        else:
+            print("    [+] Skills are aligned. Focus on continuous tenure and scale of impact.")
+    else:
+        print("    - Profile ranks within the highest compensation band in current market data.")
 
-    km = KMeans(n_clusters=k, random_state=42, n_init=10)
-    df["Cluster"] = km.fit_predict(scaled)
 
-    # Sort cluster names by average pay
-    rank = df.groupby("Cluster")["Salary_LPA"].mean().sort_values().index
-    names = [f"Band {i+1} (Tier {i+1})" for i in range(k)]
-    mapping = {rank[i]: names[i] for i in range(k)}
-    df["Salary_Band"] = df["Cluster"].map(mapping)
+# ===============================================================================
+# PIPELINE ORCHESTRATION & REAL-TIME INGESTION
+# ===============================================================================
 
-    summary = df.groupby("Salary_Band").agg(
-        Count=('Salary_LPA', 'count'),
-        Exp_Min=('Experience_Yrs', 'min'),
-        Exp_Max=('Experience_Yrs', 'max'),
-        Salary_Min=('Salary_LPA', 'min'),
-        Median_LPA=('Salary_LPA', 'median'),
-        Mean_LPA=('Salary_LPA', 'mean')
-    ).round(2).reindex(names)
+def main():
+    # Ingest runtime profile
+    live_user_profile = {
+        "experience": 4.5,
+        "skills": ["Python", "SQL", "Docker"],
+        "target_region": "Bengaluru",
+        "target_tier": "Tier-1 Product"
+    }
 
-    st.dataframe(summary, use_container_width=True)
+    print("\n" + "#" * 80)
+    print("RUNNING LIVE REAL-TIME SALARY PREDICTION PIPELINE")
+    print(f"User Input: Exp={live_user_profile['experience']} yrs | "
+          f"Skills={live_user_profile['skills']} | "
+          f"Target Region={live_user_profile['target_region']} | "
+          f"Target Company={live_user_profile['target_tier']}")
+    print("#" * 80 + "\n")
 
-    fig2, ax2 = plt.subplots(figsize=(9, 4.5))
-    sns.scatterplot(
-        data=df,
-        x="Experience_Yrs",
-        y="Salary_LPA",
-        hue="Salary_Band",
-        palette="viridis",
-        alpha=0.8,
-        ax=ax2
-    )
-    ax2.set_title("Market Clusters: Experience vs Salary Banding")
-    ax2.set_xlabel("Experience (Years)")
-    ax2.set_ylabel("Salary (LPA)")
-    st.pyplot(fig2)
+    # Step 1: Synthesize and prepare data
+    raw_df = generate_mock_salary_data(n_samples=3000)
+    
+    # Phase 1: Fit Distribution, Compute CIs, Filter Outliers
+    clean_df = run_phase_1(raw_df)
+    
+    # Phase 2: Hypothesis Testing
+    run_phase_2(clean_df)
+    
+    # Phase 3: Dual ML Inference
+    predicted_lpa, target_median = run_phase_3(clean_df, live_user_profile)
+    
+    # Phase 4: Market Banding & Career Gap Plan
+    run_phase_4(clean_df, live_user_profile, predicted_lpa)
+    
+    print("\n" + "=" * 80)
+    print("EXECUTIVE SUMMARY REPORT")
+    print(f"  * Estimated Fair Market Value : {predicted_lpa:.2f} LPA")
+    print(f"  * Target Tier Benchmark       : {target_median:.2f} LPA ({live_user_profile['target_tier']})")
+    print(f"  * Delta to Median Target      : {predicted_lpa - target_median:+.2f} LPA")
+    print("=" * 80 + "\n")
+
+if __name__ == "__main__":
+    main()
